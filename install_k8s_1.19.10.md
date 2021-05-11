@@ -6,10 +6,11 @@ tags: kubeadm, Kubernetes, Kubeflow
 
 |Resource|Version|
 |---|---|
-|Host OS|Ubuntu Server 20.04.2 LTS|
-|docker-ce|20.10.6|
+|Host OS|Ubuntu MATE Desktop 20.04.2 LTS|
 |Kubernetes|v1.19.10|
-|Helm|v3.5.3|
+|deployment tool|kubeadm|
+|CRI|containerd 1.4.4|
+|cgroup driver|systemd|
 
 [TOC]
 
@@ -20,7 +21,7 @@ apt update && apt upgrade -y
 apt install vim htop net-tools build-essential openssh-server axel tmux
 ```
 
-## Install Docker
+## containerd
 
 ```bash
 apt-get remove docker docker-engine docker.io containerd runc
@@ -41,34 +42,62 @@ apt-get update
 ```
 
 ```bash
-DOCKER_VER="5:20.10.6~3-0~ubuntu-focal"
 CONTAINERD_VER="1.4.4-1"
 
-apt-get install -y docker-ce=${DOCKER_VER} docker-ce-cli=${DOCKER_VER} containerd.io=${CONTAINERD_VER}
-
-docker run hello-world  # verification
+apt-get install -y containerd.io=${CONTAINERD_VER}
 ```
 
 ```bash
-apt-mark hold docker-ce docker-ce-cli containerd.io
+apt-mark hold containerd.io
 ```
 
-### (Optional) Enable experimental features
+### Configure containerd
 
-To build multi-arch images on this node, add **"experimental": "enabled"** to ~/.docker/config.json
+<https://kubernetes.io/docs/setup/production-environment/container-runtimes/#containerd>
 
 ```bash
-systemctl restart docker
+cat <<EOF | sudo tee /etc/modules-load.d/containerd.conf
+overlay
+br_netfilter
+EOF
+
+sudo modprobe overlay
+sudo modprobe br_netfilter
+
+# Setup required sysctl params, these persist across reboots.
+cat <<EOF | sudo tee /etc/sysctl.d/99-kubernetes-cri.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.ipv4.ip_forward                 = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+EOF
+
+# Apply sysctl params without reboot
+sudo sysctl --system
 ```
 
-## Install docker-compose
+```bash
+sudo mkdir -p /etc/containerd
+containerd config default | sudo tee /etc/containerd/config.toml
+```
+
+### Configure cgroup driver
 
 ```bash
-DC_VER=1.29.1
+vi /etc/containerd/config.toml
+```
 
-axel -n 20 -o docker-compose "https://github.com/docker/compose/releases/download/${DC_VER}/docker-compose-Linux-x86_64"
-chmod 755 docker-compose
-mv docker-compose /usr/bin
+```bash
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+  ...
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+    SystemdCgroup = true  # add this
+```
+
+### Restart and reaload on boot
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart containerd
 ```
 
 ## Install Kubernetes with kubeadm
@@ -79,7 +108,7 @@ mv docker-compose /usr/bin
 swapoff -a
 ```
 
-To permanently disable Swap, edit /etc/fstab and then update grub.
+To permanently disable Swap, edit /etc/fstab.
 
 ### Bridged traffic and iptables
 
@@ -113,12 +142,27 @@ apt-get install -y kubelet=${K_VER} kubectl=${K_VER} kubeadm=${K_VER}
 apt-mark hold kubelet kubeadm kubectl
 ```
 
+### Configure kubelet
+
 ```bash
-systemctl daemon-reload
-systemctl restart kubelet
+cat > /etc/systemd/system/kubelet.service.d/10-kubeadm.conf << EOF
+# Note: This dropin only works with kubeadm and kubelet v1.11+
+[Service]
+Environment="KUBELET_KUBECONFIG_ARGS=--bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf"
+Environment="KUBELET_CONFIG_ARGS=--config=/var/lib/kubelet/config.yaml"
+# This is a file that "kubeadm init" and "kubeadm join" generates at runtime, populating the KUBELET_KUBEADM_ARGS variable dynamically
+EnvironmentFile=-/var/lib/kubelet/kubeadm-flags.env
+# This is a file that the user can use for overrides of the kubelet args as a last resort. Preferably, the user should use
+# the .NodeRegistration.KubeletExtraArgs object in the configuration files instead. KUBELET_EXTRA_ARGS should be sourced from this file.
+EnvironmentFile=-/etc/default/kubelet
+ExecStart=
+# ExecStart=/usr/bin/kubelet    
+Environment="KUBELET_CGROUP_ARGS=--cgroup-driver=systemd"
+ExecStart=/usr/bin/kubelet
+EOF
 ```
 
-### Initializes the control-plane node
+### Initialize the control-plane node
 
 #### Pull images from k8s.gcr.io
 
@@ -143,26 +187,22 @@ W0429 15:48:45.321686   10570 configset.go:348] WARNING: kubeadm cannot validate
 
 ```bash
 kubeadm init \
---image-repository="k8s.gcr.io" \
+--image-repository=k8s.gcr.io \
 --kubernetes-version=${K_VER} \
---pod-network-cidr="10.244.0.0/16" \
---service-cidr="10.96.0.0/12"
-```
-
-```bash
-rm -r ${HOME}/.kube
-mkdir -p ${HOME}/.kube
-cp -i /etc/kubernetes/admin.conf ${HOME}/.kube/config
-chown $(id -u):$(id -g) ${HOME}/.kube/config
+--pod-network-cidr=10.244.0.0/16 \
+--service-cidr=10.96.0.0/12 \
+--control-plane-endpoint="$(hostname)" \
+--apiserver-advertise-address=0.0.0.0 \
+--cri-socket="/run/containerd/containerd.sock"
 ```
 
 ```bash
 echo -e "\nalias k=kubectl" >> ${HOME}/.bashrc
-echo "export KUBECONFIG=${HOME}/.kube/config" >> ${HOME}/.bashrc
+echo "export KUBECONFIG=/etc/kubernetes/admin.conf" >> ${HOME}/.bashrc
 source ${HOME}/.bashrc
 ```
 
-Wait for the 5 Pods being Running status. There're 2 Pods still in Pending status. It's fine.
+### Install CNI Plugin
 
 Install **Flannel v0.13.0** for Pod network.
 
@@ -174,21 +214,18 @@ wget "https://raw.githubusercontent.com/flannel-io/flannel/v0.13.0/Documentation
 kubectl apply -f ./kube-flannel.yml
 ```
 
-Wait for the 8 Pods being Running status.
-
 ```bash
 $ kubectl get po -n kube-system
 
-NAME                            READY   STATUS    RESTARTS   AGE
-coredns-f9fd979d6-4nmqr         1/1     Running   0          4m5s
-coredns-f9fd979d6-np8qk         1/1     Running   0          4m5s
-etcd-tompc                      1/1     Running   0          4m23s
-kube-apiserver-tompc            1/1     Running   0          4m23s
-kube-controller-manager-tompc   1/1     Running   0          4m23s
-kube-flannel-ds-tvh96           1/1     Running   0          99s
-kube-proxy-bw4kq                1/1     Running   0          4m5s
-kube-scheduler-tompc            1/1     Running   0          4m23s
-
+NAME                              READY   STATUS    RESTARTS   AGE
+coredns-f9fd979d6-v8dgp           1/1     Running   0          29m
+coredns-f9fd979d6-wt88m           1/1     Running   0          29m
+etcd-tom-k8s                      1/1     Running   0          29m
+kube-apiserver-tom-k8s            1/1     Running   0          29m
+kube-controller-manager-tom-k8s   1/1     Running   0          29m
+kube-flannel-ds-5jqww             1/1     Running   0          26m
+kube-proxy-kdxtr                  1/1     Running   0          29m
+kube-scheduler-tom-k8s            1/1     Running   0          29m
 ```
 
 ### Untaint the control-plan Node
@@ -196,7 +233,7 @@ kube-scheduler-tompc            1/1     Running   0          4m23s
 ```bash
 $ kubectl taint nodes --all node-role.kubernetes.io/master-
 
-node/aaeon-boxer-6842m untainted
+node/tom-k8s untainted
 ```
 
 ### Deploy helloworld sample application
