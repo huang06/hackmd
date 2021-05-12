@@ -1,5 +1,5 @@
 ---
-tags: kubeadm, Kubernetes, Kubeflow
+tags: Kubernetes
 ---
 
 # Kubernetes v1.19.10 Installation
@@ -317,95 +317,15 @@ Delete app.
 kubectl delete -f ./helloworld.yaml
 ```
 
-## Install Helm 3
-
-```bash
-HELM_VER="v3.5.3"
-
-curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/${HELM_VER}/scripts/get-helm-3 \
-&& chmod 700 get_helm.sh \
-&& ./get_helm.sh
-```
-
-## Install Dynamic NFS Provisioner
-
-### Set up NFS Server on host
-
-```bash
-apt-get install -y nfs-common nfs-kernel-server
-```
-
-```bash
-EXTERNAL_NFS_IP="127.0.0.1"
-EXTERNAL_NFS_DIR="/svc/nfsdata"
-
-mkdir -p ${EXTERNAL_NFS_DIR}
-
-# echo "${EXTERNAL_NFS_DIR} *(rw,no_root_squash,no_subtree_check)" | tee -a /etc/fstab > /dev/null
-echo "${EXTERNAL_NFS_DIR} *(rw,no_root_squash,no_subtree_check)" | tee -a /etc/exports > /dev/null
-```
-
-```bash
-systemctl restart nfs-kernel-server
-```
-
-Verify that NFS server is accessible.
-
-```bash
-$ showmount -e ${EXTERNAL_NFS_IP}
-
-Export list for 127.0.0.1:
-/var/nfsdata *
-```
-
-### Install nfs-subdir-external-provisioner
-
-```bash
-helm repo add nfs-subdir-external-provisioner https://kubernetes-sigs.github.io/nfs-subdir-external-provisioner/
-```
-
-```bash
-CHART_VERSION="4.0.4"
-
-helm install nfs-subdir-external-provisioner \
-nfs-subdir-external-provisioner/nfs-subdir-external-provisioner \
---version ${CHART_VERSION} \
---set image.repository=k8s.gcr.io/sig-storage/nfs-subdir-external-provisioner \
---set image.tag=v4.0.0 \
---set nfs.server=${EXTERNAL_NFS_IP} \
---set nfs.path=${EXTERNAL_NFS_DIR} \
---set storageClass.name=nfs \
---set storageClass.defaultClass=true
-```
-
-#### Verification
-
-```bash
-$ kubectl logs -l app=nfs-subdir-external-provisioner
-
-I0429 17:03:08.859100       1 leaderelection.go:242] attempting to acquire leader lease  default/cluster.local-nfs-subdir-external-provisioner...
-I0429 17:03:08.864928       1 leaderelection.go:252] successfully acquired lease default/cluster.local-nfs-subdir-external-provisioner
-I0429 17:03:08.865024       1 event.go:278] Event(v1.ObjectReference{Kind:"Endpoints", Namespace:"default", Name:"cluster.local-nfs-subdir-external-provisioner", UID:"86a13d77-ac94-463b-bbae-5e7116371cc1", APIVersion:"v1", ResourceVersion:"9910", FieldPath:""}): type: 'Normal' reason: 'LeaderElection' nfs-subdir-external-provisioner-6bd9449677-8fhwz_c6852cf4-7cbe-475f-a425-e7e734339f72 became leader
-I0429 17:03:08.865075       1 controller.go:820] Starting provisioner controller cluster.local/nfs-subdir-external-provisioner_nfs-subdir-external-provisioner-6bd9449677-8fhwz_c6852cf4-7cbe-475f-a425-e7e734339f72!
-I0429 17:03:08.965280       1 controller.go:869] Started provisioner controller cluster.local/nfs-subdir-external-provisioner_nfs-subdir-external-provisioner-6bd9449677-8fhwz_c6852cf4-7cbe-475f-a425-e7e734339f72!
-```
-
 ## Remove K8s Cluster completely
 
 ```bash
 kubeadm reset -f
 ```
 
-Harbor
-
-```bash
-docker-compose down -v
-```
-
 Kubernetes
 
 ```bash
-
 rm -rf ${HOME}/.kube
 
 sudo -i
@@ -418,19 +338,6 @@ ifconfig flannel.1 down
 ip link delete flannel.1
 rm -rf /var/lib/cni/
 rm -f /etc/cni/net.d/*
-```
-
-Kubeflow PVC
-
-```bash
-cd /svc/nfsdata
-
-rm -rf kubeflow-minio-pv-claim-pvc* \
-kubeflow-mysql-pv-claim-pvc* \
-kubeflow-katib-mysql-pvc* \
-kubeflow-metadata-mysql-pvc*
-
-rm /usr/local/bin/kfctl
 ```
 
 ```bash
